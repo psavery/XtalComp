@@ -9,7 +9,7 @@ target_link_libraries (test XtalComp)
 
 option( BUILD_CGI
  	"Whether to compile the CGI handler as well as the XtalComp code."
- 	OFF )
+ 	ON )
 if(BUILD_CGI)
   add_executable (xtalcomp.cgi cgi/xtalcomp-cgi.cpp)
   target_link_libraries (xtalcomp.cgi XtalComp)

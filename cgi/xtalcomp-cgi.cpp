@@ -137,6 +137,7 @@ char **getcgivars() {
 
 #include "../xtalcomp.h"
 
+#include <cassert>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -144,9 +145,185 @@ char **getcgivars() {
 #define PRINT_DIV \
   printf("|-------------------------------------|-------------------------------------|\n")
 
+#define SUPERCELL_BUILDER_DEBUG
+
 bool parsePOSCAR(char *, XcMatrix&, std::vector<XcVector>&, std::vector<unsigned int>&);
 
 std::string debug;
+
+// Counts the number of times 'val' occurs in a
+// vector of that type
+template <typename T>
+uint countNumOccurrences(const std::vector<T>& vec,
+                         const T& val)
+{
+  uint numOccurrences = 0;
+  for (size_t i = 0; i < vec.size(); i++) {
+    if (vec.at(i) == val) numOccurrences++;
+  }
+  return numOccurrences;
+}
+
+uint getFormulaUnits(const std::vector<uint>& types)
+{
+  // Find the atom type with the smallest quantity
+  uint smallestQuantity = 10000000;
+  for (size_t i = 0; i < types.size(); i++) {
+    uint tmp = countNumOccurrences<uint>(types, types.at(i));
+    if (tmp < smallestQuantity) smallestQuantity = tmp;
+  }
+
+  uint formulaUnits = 1;
+  bool formulaUnitsFound;
+  // Start with the smallest quantity and work our way down to 1
+  for (size_t i = smallestQuantity; i > 1; i--) {
+    formulaUnitsFound = true;
+    for (size_t j = 0; j < types.size(); ++j) {
+      // If we find any cases where there is a remainder after dividing, then
+      // this is not the correct number of formula units
+      if (countNumOccurrences<uint>(types, types.at(j)) % i != 0) formulaUnitsFound = false;
+    }
+    if (formulaUnitsFound == true) {
+      formulaUnits = i;
+      break;
+    }
+  }
+  return formulaUnits;
+}
+
+// Counts the number of each type and stores them in the same
+// order in a vector
+// For example, if the input vector is "0, 0, 0, 1, 1, 2",
+// the output vector is "3, 2, 1"
+template <typename T>
+std::vector<uint> countNumOfEachType(const std::vector<T>& types)
+{
+  std::vector<uint> ret;
+  std::vector<T> alreadyCounted;
+  for (size_t i = 0; i < types.size(); i++) {
+    // Check and make sure we haven't already counted this one
+    bool alreadyDone = false;
+    for (size_t j = 0; j < alreadyCounted.size(); j++) {
+      if (alreadyCounted.at(j) == types.at(i)) {
+        alreadyDone = true;
+        break;
+      }
+    }
+    if (alreadyDone) continue;
+
+    // Let's count how many times this occurs!
+    uint numOccurrences = countNumOccurrences<T>(types, types.at(i));
+    ret.push_back(numOccurrences);
+    alreadyCounted.push_back(types.at(i));
+  }
+
+  return ret;
+}
+
+static inline uint findLeastCommonMultiple(uint a, uint b)
+{
+  uint lcm = (a > b) ? a : b;
+  while (true) {
+    if (lcm % a == 0 && lcm % b == 0) return lcm;
+    lcm++;
+  }
+}
+
+static inline uint findGreatestPrimeFactor(uint a)
+{
+  if (a == 0) return 0;
+  else if (a == 1) return 1;
+
+  // Every time it hits a factor, it will divide the number by it
+  // It will end on the greatest prime factor
+  for (size_t i = 2; i < a; i++) {
+    if (a % i == 0) {
+      a /= i;
+      i = 2;
+    }
+  }
+  return a;
+}
+
+// This is a recursive function
+void buildSupercell(XcMatrix& cell, std::vector<uint>& types,
+                    std::vector<XcVector>& pos, uint FU, uint targetFU)
+{
+  assert(targetFU % FU == 0);
+
+  // Find the largest prime number multiple. We will expand
+  // upon the shortest length of the cell with this number. We will perform
+  // the other duplications through recursion of this whole function.
+  uint totalNumDuplications = targetFU / FU;
+  uint numDuplications = findGreatestPrimeFactor(totalNumDuplications);
+
+  // Find the shortest side
+  // 0 == A, 1 == B, 2 == C
+  double A = cell.row(0).norm();
+  double B = cell.row(1).norm();
+  double C = cell.row(2).norm();
+
+  uint shortestSide = 0;
+  if (B < A && B < C) shortestSide = 1;
+  else if (C < A && C < B) shortestSide = 2;
+
+  // Expand the cell
+  for (size_t i = 0; i <= 2; i++) cell(shortestSide, i) *= numDuplications;
+
+#ifdef SUPERCELL_BUILDER_DEBUG
+  std::cerr << "A is " << A << ", B is " << B << ", and C is " << C << "\n";
+  std::cerr << "After " << numDuplications << " duplications on vector number " << shortestSide << ":\n";
+  std::cerr << "A is now " << cell.row(0).norm() << ", B is " << cell.row(1).norm() << ", and C is " << cell.row(2).norm() << "\n";
+#endif
+
+  // Create a new types vector with the correct types
+  std::vector<uint> newTypes;
+  for (size_t i = 0; i < types.size(); i++) {
+    for (size_t j = 0; j < numDuplications; j++) {
+      newTypes.push_back(types.at(i));
+    }
+  }
+  types = newTypes;
+
+#ifdef SUPERCELL_BUILDER_DEBUG
+  std::cerr << "Old atom positions were as follows:\n";
+  for (size_t i = 0; i < pos.size(); i++) {
+    for (size_t j = 0; j <= 2; j++) {
+      std::cerr << pos.at(i)(j) << " ";
+    }
+    std::cerr << "\n";
+  }
+#endif
+
+  // Create a new atom vector with the correct atoms in it
+  std::vector<XcVector> newPos;
+  for (size_t i = 0; i < pos.size(); i++) {
+    for (size_t j = 0; j < numDuplications; j++) {
+      XcVector tmp(pos.at(i));
+      tmp(shortestSide) /= numDuplications;
+      double lenOfOneUnit = 1.0 / static_cast<double>(numDuplications);
+      tmp(shortestSide) += (static_cast<double>(j) * lenOfOneUnit);
+      newPos.push_back(tmp);
+    }
+  }
+  pos = newPos;
+
+#ifdef SUPERCELL_BUILDER_DEBUG
+  std::cerr << "New atom positions are as follows:\n";
+  for (size_t i = 0; i < pos.size(); i++) {
+    for (size_t j = 0; j <= 2; j++) {
+      std::cerr << pos.at(i)(j) << " ";
+    }
+    std::cerr << "\n";
+  }
+#endif
+
+  // We have a new FU
+  uint newFU = getFormulaUnits(types);
+
+  // If we aren't done, call the function again
+  if (newFU != targetFU) buildSupercell(cell, types, pos, newFU, targetFU);
+}
 
 // XtalComp CGI wrapper:
 int main() {
@@ -203,6 +380,42 @@ int main() {
     return 1;
   }
 
+  bool supercellGenerated1 = false, supercellGenerated2 = false;
+
+  // If the counts are not equal, see if we should build a supercell to
+  // compare them
+  if (types1.size() != types2.size()) {
+    uint FU1 = getFormulaUnits(types1);
+    uint FU2 = getFormulaUnits(types2);
+    std::vector<uint> numOfEachType1 = countNumOfEachType<uint>(types1);
+    std::vector<uint> numOfEachType2 = countNumOfEachType<uint>(types2);
+
+    std::vector<uint> empiricalFormulaCounts1;
+    std::vector<uint> empiricalFormulaCounts2;
+
+    for (size_t i = 0; i < numOfEachType1.size(); i++)
+      empiricalFormulaCounts1.push_back(numOfEachType1.at(i) / FU1);
+    for (size_t i = 0; i < numOfEachType2.size(); i++)
+      empiricalFormulaCounts2.push_back(numOfEachType2.at(i) / FU2);
+
+    // If these two are equal, they have the same empirical formula and we
+    // can build supercells to compare them!
+    if (empiricalFormulaCounts1 == empiricalFormulaCounts2) {
+      // We are going to build supercells so that each cell has an FU equal
+      // to the least common multiple (LCM) of the two
+      uint lcm = findLeastCommonMultiple(FU1, FU2);
+
+      if (lcm != FU1) {
+        buildSupercell(cell1, types1, pos1, FU1, lcm);
+        supercellGenerated1 = true;
+      }
+      if (lcm != FU2) {
+        buildSupercell(cell2, types2, pos2, FU2, lcm);
+        supercellGenerated2 = true;
+      }
+    }
+  }
+
   bool match = XtalComp::compare(cell1, types1, pos1,
                                  cell2, types2, pos2,
                                  transform, cartTol, angleTol);
@@ -236,7 +449,13 @@ int main() {
     printf("</font>\n") ;
     }
 
-  printf("<h1>Input structures:</h1>\n") ;
+  printf("<h1>Input structures:</h1>\n");
+
+  if (supercellGenerated1)
+    printf("NOTE: a supercell was generated for cell1 because the two cells did not have the same numbers of atoms<br>\n");
+  if (supercellGenerated2)
+    printf("NOTE: a supercell was generated for cell2 because the two cells did not have the same numbers of atoms<br>\n");
+
   printf("<font face=\"Courier New, Courier, monospace\">\n");
   printf("<pre>\n");
   PRINT_DIV;
@@ -289,6 +508,27 @@ void Debug(const char *str, const double d)
 }
 void Debug(const std::string &str, const double d) {Debug(str.c_str(), d);}
 
+// A simple function to remove leading and trailing white space
+void trim(std::string& s)
+{
+  size_t p = s.find_first_not_of(" \t");
+  s.erase(0, p);
+
+  p = s.find_last_not_of(" \t");
+  if (std::string::npos != p) s.erase(p+1);
+}
+
+// A simple function that checks to see if a string only contains ints
+// and spaces
+inline bool isIntLine(const std::string& s)
+{
+  for (size_t i = 0; i < s.size(); i++) {
+    // If it's not a digit, a space, or a return, return false
+    if (!isdigit(s.at(i)) && s.at(i) != ' ' && s.at(i) != '\r') return false;
+  }
+  return true;
+}
+
 bool parsePOSCAR(char *str, XcMatrix &cell,
                  std::vector<XcVector> &pos,
                  std::vector<unsigned int> &types)
@@ -333,9 +573,16 @@ bool parsePOSCAR(char *str, XcMatrix &cell,
   // Store frac->cart matrix
   XcMatrix toCart = cell.transpose().inverse();
 
+  // Sometimes, atomic symbols go here.
+  // If we have something here that is not an int, ignore it and move to the
+  // next line. Trim it first.
+  getline(lines, line);
+  trim(line);
+  // If it's not an int, move on to the next line
+  if (!isIntLine(line)) getline(lines, line);
+
   // List of atom types
   std::vector<int> counts (15); // Allow up to 15 atom types.
-  getline(lines, line);
   int tmpint;
   int numTypes = sscanf(line.c_str(), "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
                         &counts[0], &counts[1], &counts[2],
